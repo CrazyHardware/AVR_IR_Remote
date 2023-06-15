@@ -1,0 +1,198 @@
+#define F_CPU 16000000UL
+
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include <string.h>
+#include <util/delay.h>
+
+#define TIMER0 52
+
+void port_init(void) ;
+void setPWMCarrier(void) ;
+void PWMON(void) ;
+void PWMOFF(void) ;
+void startProtocol(void) ;
+
+/* Variable which counts the output compare matches of timer1 */
+uint8_t timer1IntCount = 0 ;
+/* variable which counts the sent bits */
+uint8_t bitCount = 0 ;
+/* variable which stores each bit of the sequence */
+uint8_t bit = 0 ;
+/* counts the transmitted bits */
+uint8_t transmitbit = 0 ;
+/* The 32-bit code which is transmitted from the IR remote control */
+unsigned long IR = 0 ;
+
+/* It is not used in this project */
+ISR(TIMER0_OVF_vect)
+{
+	/* do nothing */
+	//PORTD ^= (1 << PORTD6) ;
+}
+
+/* Interrupt handler for the Timer1_OutputC_Compare_A interrupt */
+ISR(TIMER1_COMPA_vect)
+{
+	timer1IntCount++ ;
+	if (timer1IntCount == 1)
+	{
+		/* 9ms burst ended*/
+		PWMOFF() ;
+		/* stop timer */
+		TCCR1B &= 0b11111000 ; /* Clearing the prescaler bits */
+		/* reset timer */
+		TCNT1 = 0 ;
+		/* begin 4.5ms space */
+		OCR1A = 9000 ;
+		/* start timer */
+		TCCR1B |= (1 << CS11) ;
+	}
+	/* if timerIntCount == 2  then 4.5ms space has ended */
+	if (timer1IntCount > 1 && transmitbit == 0 && bitCount < 33)
+	{
+		/* stop timer */
+		TCCR1B &= 0b11111000 ;
+		/* reset timer */
+		TCNT1 = 0 ;
+		
+		if ((IR & 0x80000000) == 0)
+		{
+			bit = 0 ;
+		}
+		else
+		{
+			bit = 1 ;
+		}
+		IR <<= 1 ;
+		bitCount++ ;
+		transmitbit++ ;
+	}
+	
+	if (transmitbit == 1)	/* burst mode */
+	{
+		/* stop timer */
+		TCCR1B &= 0b11111000 ;
+		/* reset timer */
+		TCNT1 = 0 ;
+		transmitbit++ ;
+		/* set for 560 us */
+		OCR1A = 8960 ;
+		/* begin burst */
+		PWMON() ;
+		/* start timer */
+		TCCR1B |= (1 << CS10) ;
+	}
+	else if (transmitbit == 2)	/* space mode */
+	{
+		/* stop timer */
+		TCCR1B &= 0b11111000 ;
+		/* reset timer */
+		TCNT1 = 0 ;
+		transmitbit = 0 ;		/* end transmission */
+		/* stop burst */
+		PWMOFF() ;
+		if (bit == 0)
+		{
+			/* set for 560 us space */
+			OCR1A = 8960 ;
+		}
+		else
+		{
+			/* set for 1690 us space */
+			OCR1A = 27040 ;
+		}
+		/* start timer */
+		TCCR1B |= (1 << CS10) ;
+	}
+	
+	//if (bitCount == 33)
+	//{
+		///* End of code transmission */
+		//bitCount = 0 ;
+		//TCCR1B &= 0b11111000 ;
+		//TIMSK1 = 0 ;
+	//}
+	
+}
+
+int main(void)
+{
+	timer1IntCount = 0 ;
+	bitCount = 0 ;
+	bit = 0 ;
+	transmitbit = 0 ;
+	IR = 0x20DF10EF ;
+	
+	
+	port_init() ;
+	setPWMCarrier() ;
+	sei() ;
+	startProtocol() ;
+	
+	while (1)
+	{
+		//_delay_ms(800) ;
+		//bitCount = 0 ;
+		//transmitbit = 0 ;
+		//bit = 0 ;
+		//timer1IntCount = 0 ;
+		//IR = 0x20DF10EF ;
+		//startProtocol() ;
+	}
+}
+
+void port_init(void)
+{
+	/* PD5 as digital output */
+	DDRD = (1 << PORTD5) ;
+	/* PD5 is low */
+	PORTD = 0 ;
+}
+
+void setPWMCarrier(void)
+{
+	/* COM0B1 = 1, COM0B0 = 0 => non-inverting mode */
+	TCNT0 = 0 ;
+	/* This is the top value of the timer */
+	OCR0A = TIMER0 ;
+	/* This is the value specifies the duty cycle. If timer has the same value then the OC0B will toggle */
+	/* if OCR0A is 52 and OCR0B is 52/2 = 26 then duty cycle is 50% */
+	/* F_PWM = 2 MHz / 52 = 38.46 kHz */
+	OCR0B = 26 ;
+	TCCR0A = (1 << WGM01) | (1 << WGM00) ; /* Mode 7 Fast-PWM, TOP = OCRA, Update */
+	TCCR0B = (1 << WGM02) ;
+	/* Can be ignored */
+	TIMSK0 = (1 << TOIE0) ;		/* Enable timer0-ovf interrupt */
+	TCCR0B |= (1 << CS01) ;		/* Enable timer, clk/8 = 2 MHz */
+}
+
+void PWMON(void)
+{
+	/* Set COM0B1 bit at 1 */
+	/* And starts the PWM waveform on OC0B pin */
+	TCCR0A |= (1 << COM0B1) ;
+}
+
+void PWMOFF(void)
+{
+	/* Clear COMB1 COMB0 bits */
+	/* Pin OC0B disconnected */
+	TCCR0A &= 0b11001111 ;
+}
+
+void startProtocol(void)
+{
+	/* Reset 16-bit Timer1 */
+	TCNT1 = 0 ;
+	TCCR1B = (1 << WGM12) ;	/* Enable CTC mode in compare OCR1A */
+	/* Initial value of the OCR1A */
+	OCR1A = 18000 ;
+	/* Timer1 Output Compare Match A Interrupt Enable */
+	TIMSK1 = (1 << OCIE1A) ;
+	PWMON() ;
+	/* Enable Timer1 */
+	TCCR1B |= (1 << CS11) ; /* Prescaler Clk/8 */
+}
+
+
